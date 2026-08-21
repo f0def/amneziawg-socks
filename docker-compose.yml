@@ -6,16 +6,21 @@ services:
     image: amneziawg-socks:latest
     container_name: amneziawg-socks
     restart: unless-stopped
-    cap_add:
-      - NET_ADMIN
-    devices:
-      - /dev/net/tun
-    sysctls:
-      net.ipv4.conf.all.src_valid_mark: 1
-    # Some Docker hosts (default bridge network, restricted VMs) refuse to
-    # apply the sysctl above even with NET_ADMIN. If awg-quick fails with
-    # "Read-only file system" on src_valid_mark, uncomment this instead:
-    # privileged: true
+    # Many Docker hosts (Docker Desktop, WSL2, restricted VMs) refuse to
+    # apply net.ipv4.conf.all.src_valid_mark from inside the container even
+    # with cap_add: NET_ADMIN + sysctls: — awg-quick then fails with
+    # "Read-only file system" and the container restart-loops without ever
+    # starting the proxy. privileged: true is the reliable default here.
+    #
+    # On a hardened Linux host (bare metal/VPS) you can usually replace it
+    # with the more restrictive:
+    #   cap_add:
+    #     - NET_ADMIN
+    #   devices:
+    #     - /dev/net/tun
+    #   sysctls:
+    #     net.ipv4.conf.all.src_valid_mark: 1
+    privileged: true
     volumes:
       - ./amnezia-wg.conf:/conf/awg0.conf:ro
     environment:
