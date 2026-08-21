@@ -1,0 +1,27 @@
+services:
+  amneziawg-socks:
+    # Locally built image (see README, "Build" section). No build: section
+    # here on purpose, so a plain `docker compose up` never rebuilds the
+    # image and just runs the one you already built.
+    image: amneziawg-socks:latest
+    container_name: amneziawg-socks
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun
+    sysctls:
+      net.ipv4.conf.all.src_valid_mark: 1
+    # Some Docker hosts (default bridge network, restricted VMs) refuse to
+    # apply the sysctl above even with NET_ADMIN. If awg-quick fails with
+    # "Read-only file system" on src_valid_mark, uncomment this instead:
+    # privileged: true
+    volumes:
+      - ./amnezia-wg.conf:/conf/awg0.conf:ro
+    environment:
+      AWG_CONF_FILE: /conf/awg0.conf
+      SOCKS5_PORT: "1080"
+      # SOCKS5_USER: "myuser"
+      # SOCKS5_PASS: "mypass"
+    ports:
+      - "1080:1080"

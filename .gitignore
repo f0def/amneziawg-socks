@@ -1,0 +1,10 @@
+# AmneziaWG configs contain private keys / PSKs — never commit real ones
+*.conf
+
+# Local env overrides (e.g. BUILDX_NO_DEFAULT_ATTESTATIONS) — machine-specific
+.env
+
+# Claude Code session directory
+.claude/
+
+.DS_Store

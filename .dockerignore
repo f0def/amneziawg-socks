@@ -1,0 +1,6 @@
+*.conf
+.git
+.github
+README.md
+LICENSE
+docker-compose.yml
