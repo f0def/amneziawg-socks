@@ -13,6 +13,9 @@ A small Docker image (Alpine-based) that:
 2. Runs a SOCKS5 proxy inside the container
    ([`microsocks`](https://github.com/rofl0r/microsocks)) whose traffic is
    fully routed through the tunnel.
+3. Runs an HTTP/HTTPS proxy ([`privoxy`](https://www.privoxy.org/)) that
+   forwards everything to the SOCKS5 proxy above — for clients that only
+   speak HTTP proxying (`HTTP_PROXY`/`HTTPS_PROXY`), not SOCKS.
 
 The config is supplied from the outside via an environment variable or a
 bind mount — your `.conf` file is never baked into the image.
@@ -39,9 +42,11 @@ build stages. Final image size is around 35 MB.
 
 The final layer only installs what's actually needed at runtime:
 `iproute2` (routing), `nftables` (policy routing rules `awg-quick` sets up
-for the tunnel), `bash` (required by the `awg-quick` script), and
-`openresolv` (DNS via `resolvconf`). There's no `ca-certificates` — neither
-the tunnel nor the proxy make any HTTPS calls.
+for the tunnel), `bash` (required by the `awg-quick` script), `openresolv`
+(DNS via `resolvconf`), and `privoxy` (HTTP proxy front-end). There's no
+`ca-certificates` — neither the tunnel nor the proxies make any HTTPS calls
+of their own (privoxy only relays HTTPS via `CONNECT`, it never terminates
+TLS).
 
 The `amneziawg-go` stage builds natively on the build host's architecture
 and cross-compiles for the requested target (`linux/amd64` or
@@ -79,15 +84,18 @@ docker run -d --name amneziawg-socks \
   -e AWG_CONF="$CONF" \
   -e SOCKS5_PORT=1080 \
   -p 1080:1080 \
+  -p 8118:8118 \
   amneziawg-socks
 ```
 
-The proxy will be available at `socks5://<host>:1080`.
+The SOCKS5 proxy will be available at `socks5://<host>:1080`, and the HTTP
+proxy at `http://<host>:8118`.
 
 Check it (traffic should come out via the VPN server's IP):
 
 ```sh
 curl -x socks5h://127.0.0.1:1080 https://ifconfig.me
+curl -x http://127.0.0.1:8118 https://ifconfig.me
 ```
 
 ### If the container fails on `src_valid_mark: Read-only file system`
@@ -102,6 +110,7 @@ docker run -d --name amneziawg-socks \
   --privileged \
   -e AWG_CONF="$CONF" \
   -p 1080:1080 \
+  -p 8118:8118 \
   amneziawg-socks
 ```
 
@@ -120,6 +129,16 @@ without `--privileged`.
 | `SOCKS5_BIND`      | `0.0.0.0`    | Address the proxy listens on inside the container                         |
 | `SOCKS5_USER`      | —            | Username for proxy auth (optional)                                        |
 | `SOCKS5_PASS`      | —            | Password for proxy auth (optional, used together with `SOCKS5_USER`)      |
+| `HTTP_PROXY_ENABLED` | `1`        | Set to `0` to disable the HTTP proxy and only run SOCKS5                   |
+| `HTTP_PROXY_PORT`  | `8118`       | HTTP proxy port (`privoxy`, forwards to the SOCKS5 proxy above)            |
+| `HTTP_PROXY_BIND`  | `0.0.0.0`    | Address the HTTP proxy listens on inside the container                    |
+| `AWG_MAX_HANDSHAKE_AGE` | `300`   | Seconds since the last WireGuard handshake before the container is considered dead (see "Self-healing" below) |
+| `AWG_WATCHDOG_INTERVAL` | `60`    | How often (seconds) the watchdog checks handshake freshness                |
+
+The HTTP proxy has no auth of its own — it's meant for local/trusted use in
+front of the already-authenticated SOCKS5 proxy. If you need it exposed
+beyond that, put it behind something that can authenticate requests
+(e.g. a reverse proxy).
 
 Instead of `AWG_CONF` you can bind-mount the config file (it stays read-only
 outside the container; the entrypoint copies it into an internal writable
@@ -145,6 +164,22 @@ Run:
 docker compose up -d
 ```
 
+## Self-healing
+
+If the host's network drops and comes back (Wi-Fi roaming, VPN toggle,
+laptop sleep/wake, ...), a WireGuard tunnel's UDP socket can end up wedged
+with no handshake and no way to recover on its own, silently leaving a dead
+proxy running. A background watchdog checks `awg show <iface>
+latest-handshakes` every `AWG_WATCHDOG_INTERVAL` seconds and, if it's older
+than `AWG_MAX_HANDSHAKE_AGE`, exits the container so `restart:
+unless-stopped` (or `--restart unless-stopped`) brings up a fresh interface.
+The default 300s threshold is well above WireGuard's own ~120-180s rekey
+cycle, so it won't fire during normal operation.
+
+The same check is also wired up as a Docker `HEALTHCHECK`
+(`docker ps`/`docker compose ps` will show `unhealthy` if the tunnel is
+stuck), independent of the watchdog's own restart trigger.
+
 ## Implementation notes
 
 - Empty `I1`-`I5` fields (which the AmneziaWG 2.0 client sometimes exports
@@ -155,7 +190,13 @@ docker compose up -d
   `AllowedIPs` so `awg-quick` doesn't fail while adding the IPv6 route.
   The full IPv4 tunnel keeps working either way.
 - On container stop (`SIGTERM`) the interface is torn down cleanly
-  (`awg-quick down`) and `microsocks` is terminated.
+  (`awg-quick down`) and both `microsocks` and `privoxy` are terminated.
+- `privoxy` loads no `default.action`/`default.filter` files — it does no
+  ad-blocking or content rewriting of its own, it's purely an HTTP-to-SOCKS5
+  protocol front-end.
+- If either proxy process dies, the container exits so its restart policy
+  brings both back up together, rather than leaving a half-dead proxy pair
+  running.
 
 ## License
 

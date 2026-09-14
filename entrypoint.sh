@@ -60,6 +60,8 @@ fi
 
 cleanup() {
     echo "[*] Shutting down..."
+    [[ -n "${WATCHDOG_PID:-}" ]] && kill "${WATCHDOG_PID}" 2>/dev/null || true
+    [[ -n "${PRIVOXY_PID:-}" ]] && kill "${PRIVOXY_PID}" 2>/dev/null || true
     [[ -n "${MICROSOCKS_PID:-}" ]] && kill "${MICROSOCKS_PID}" 2>/dev/null || true
     awg-quick down "${CONF_PATH}" 2>/dev/null || true
     exit 0
@@ -81,4 +83,56 @@ echo "[*] Starting SOCKS5 proxy on ${SOCKS5_BIND}:${SOCKS5_PORT}"
 microsocks "${MICROSOCKS_ARGS[@]}" &
 MICROSOCKS_PID=$!
 
-wait "${MICROSOCKS_PID}"
+if [[ "${HTTP_PROXY_ENABLED:-1}" == "1" ]]; then
+    HTTP_PROXY_PORT="${HTTP_PROXY_PORT:-8118}"
+    HTTP_PROXY_BIND="${HTTP_PROXY_BIND:-0.0.0.0}"
+    PRIVOXY_CONF_DIR="/run/privoxy"
+    PRIVOXY_CONF="${PRIVOXY_CONF_DIR}/config"
+    mkdir -p "${PRIVOXY_CONF_DIR}"
+
+    # Minimal config: no default.action/filter files are loaded, so privoxy
+    # does no ad-blocking/content filtering of its own — it's purely a
+    # protocol front-end that hands every request to the local SOCKS5
+    # proxy. The trailing "." tells privoxy the SOCKS hop delivers the
+    # request directly, with no further HTTP forwarding beyond it; "5t"
+    # (vs. plain "5") has the SOCKS server resolve hostnames itself, so
+    # DNS goes through the tunnel instead of leaking to the host.
+    cat > "${PRIVOXY_CONF}" <<EOF
+confdir /etc/privoxy
+logdir ${PRIVOXY_CONF_DIR}
+listen-address ${HTTP_PROXY_BIND}:${HTTP_PROXY_PORT}
+toggle 1
+enable-remote-toggle 0
+enable-remote-http-toggle 0
+enable-edit-actions 0
+enforce-blocks 0
+accept-intercepted-requests 0
+allow-cgi-request-crunching 0
+
+forward-socks5t / 127.0.0.1:${SOCKS5_PORT} .
+EOF
+
+    echo "[*] Starting HTTP proxy on ${HTTP_PROXY_BIND}:${HTTP_PROXY_PORT} (-> SOCKS5)"
+    privoxy --no-daemon "${PRIVOXY_CONF}" &
+    PRIVOXY_PID=$!
+fi
+
+# If the host's network drops and comes back (Wi-Fi roam, VPN toggle, laptop
+# sleep/wake, ...), the tunnel's UDP socket can end up wedged with no way to
+# recover on its own. Watch handshake freshness and, if it goes stale for
+# too long, exit so the container's restart policy brings up a fresh
+# interface instead of silently leaving a dead proxy running.
+(
+    while sleep "${AWG_WATCHDOG_INTERVAL:-60}"; do
+        if ! /healthcheck.sh; then
+            echo "[!] No handshake within ${AWG_MAX_HANDSHAKE_AGE:-300}s, restarting" >&2
+            kill -TERM 1
+            break
+        fi
+    done
+) &
+WATCHDOG_PID=$!
+
+# Exit as soon as either proxy dies, so the container's restart policy can
+# bring both back up together instead of leaving a half-dead proxy pair.
+wait -n "${MICROSOCKS_PID}" ${PRIVOXY_PID:+"${PRIVOXY_PID}"}

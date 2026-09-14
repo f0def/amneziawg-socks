@@ -47,7 +47,10 @@ FROM alpine:3.20
 # package drags in libxtables/zstd-libs/libelf/libcap2 for a compat layer
 # we never use (~7MB heavier for the same result). No ca-certificates:
 # nothing in this image makes TLS/HTTPS connections.
-RUN apk add --no-cache iproute2 nftables bash openresolv
+# privoxy provides the HTTP(S) proxy front-end; it only relays to the
+# SOCKS5 proxy below, so its own default.action ad-block/filter rules are
+# never installed (see entrypoint.sh, which writes a minimal config).
+RUN apk add --no-cache iproute2 nftables bash openresolv privoxy
 
 COPY --from=awg-tools /amneziawg-tools/src/wg /usr/bin/awg
 COPY --from=awg-tools /amneziawg-tools/src/wg-quick/linux.bash /usr/bin/awg-quick
@@ -59,14 +62,23 @@ COPY --from=awg-go /usr/bin/amneziawg-go /usr/bin/amneziawg-go
 COPY --from=microsocks /microsocks/microsocks /usr/bin/microsocks
 
 COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+COPY healthcheck.sh /healthcheck.sh
+RUN chmod +x /entrypoint.sh /healthcheck.sh
 
 ENV AWG_INTERFACE=awg0 \
     SOCKS5_PORT=1080 \
     SOCKS5_BIND=0.0.0.0 \
     SOCKS5_USER= \
-    SOCKS5_PASS=
+    SOCKS5_PASS= \
+    HTTP_PROXY_ENABLED=1 \
+    HTTP_PROXY_PORT=8118 \
+    HTTP_PROXY_BIND=0.0.0.0 \
+    AWG_MAX_HANDSHAKE_AGE=300 \
+    AWG_WATCHDOG_INTERVAL=60
 
-EXPOSE 1080/tcp
+EXPOSE 1080/tcp 8118/tcp
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+    CMD ["/healthcheck.sh"]
 
 ENTRYPOINT ["/entrypoint.sh"]
